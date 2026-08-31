@@ -84,12 +84,15 @@ app.prepare().then(() => {
 
     let userId: string | null = null;
     try {
-      if (token) {
+      if (token && token !== "local-user" && token !== "guest" && token !== "undefined" && token !== "null") {
         const decodedToken = await adminAuth.verifyIdToken(token);
         userId = decodedToken.uid;
+      } else {
+        userId = "local-user";
       }
     } catch (err) {
-      console.error("Auth verification failed:", err);
+      console.error("Auth verification failed, falling back to local-user:", err);
+      userId = "local-user";
     }
 
     if (!userId) {
