@@ -19,24 +19,49 @@ app.prepare().then(() => {
   const wss = new WebSocketServer({ noServer: true });
 
   // Handle upgraded websocket connection for live voice stream
-  server.on("upgrade", (req, socket, head) => {
-    if (!process.env.GEMINI_API_KEY) {
-      console.error("GEMINI_API_KEY is not defined in the environment.");
-      socket.destroy();
-      return;
-    }
-    socket.on("error", (err) => {
-      console.warn("[WebSocket Upgrade Socket Error]", err?.message || err);
-    });
-
+  server.on("upgrade", async (req, socket, head) => {
     const parsedUrl = parse(req.url || "", true);
     const { pathname } = parsedUrl;
-    console.log(`[WebSocket] Upgrade request for ${pathname}`);
+    console.log(`[VOICE] Upgrade request for ${pathname}`);
 
     if (pathname === "/api/ws/voice") {
-      wss.handleUpgrade(req, socket, head, (ws) => {
-        wss.emit("connection", ws, req);
+      if (!process.env.GEMINI_API_KEY) {
+        console.error("[VOICE] GEMINI_API_KEY is not defined in environment.");
+        socket.write("HTTP/1.1 500 Internal Server Error\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+
+      socket.on("error", (err) => {
+        console.warn("[WebSocket Upgrade Socket Error]", err?.message || err);
       });
+
+      const token = (req.headers["authorization"]?.replace("Bearer ", "") || parsedUrl.query.token) as string;
+      console.log(`[VOICE] Auth token present: ${!!token}`);
+
+      if (!token) {
+        console.error("[VOICE] Firebase auth verified: false (No token provided)");
+        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+
+      try {
+        const decodedToken = await adminAuth.verifyIdToken(token);
+        const userId = decodedToken.uid;
+        console.log(`[VOICE] Firebase auth verified: true`);
+        console.log(`[VOICE] UID: ${userId}`);
+        (req as any).userId = userId;
+
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          wss.emit("connection", ws, req);
+        });
+      } catch (err: any) {
+        console.error(`[VOICE] Firebase auth verified: false (${err?.message || err})`);
+        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        return;
+      }
     } else {
       try {
         const upgradeHandler = app.getUpgradeHandler();
@@ -57,7 +82,14 @@ app.prepare().then(() => {
   });
 
   wss.on("connection", async (ws, req) => {
-    console.log("WebSocket client connected");
+    const userId = (req as any).userId;
+    if (!userId) {
+      console.error("[VOICE] WebSocket rejected: No verified user ID attached.");
+      ws.close();
+      return;
+    }
+
+    console.log("[VOICE] WebSocket accepted");
 
     // Handle client ws socket errors to prevent unhandled EventEmitter senderOnError crashes
     ws.on("error", (err) => {
@@ -79,43 +111,32 @@ app.prepare().then(() => {
       }
     };
 
-    const parsedUrl = parse(req.url || "", true);
-    const token = req.headers["authorization"]?.replace("Bearer ", "") || (parsedUrl.query.token as string);
-
-    let userId: string | null = null;
+    console.log("[VOICE] Loading settings");
+    let userSettings: any = {};
     try {
-      if (token && token !== "local-user" && token !== "guest" && token !== "undefined" && token !== "null") {
-        const decodedToken = await adminAuth.verifyIdToken(token);
-        userId = decodedToken.uid;
-      } else {
-        userId = "local-user";
+      const settingsDoc = await adminDb.collection("settings").doc(userId).get();
+      if (settingsDoc.exists) {
+        userSettings = settingsDoc.data() || {};
       }
-    } catch (err) {
-      console.error("Auth verification failed, falling back to local-user:", err);
-      userId = "local-user";
+    } catch (err: any) {
+      console.error("[VOICE] Error loading user settings:", err?.message || err);
     }
 
-    if (!userId) {
-      console.error("WebSocket connection rejected: No valid auth token.");
-      safeSend({ type: "error", message: "Authentication required." });
-      ws.close();
-      return;
-    }
+    const voice = userSettings.voiceId || "Zephyr";
+    const personality = userSettings.personality || "default";
+    const name = userSettings.preferredName || "friend";
+    const memoryEnabled = userSettings.memoryEnabled !== false;
 
-    let userDoc;
-    try {
-        userDoc = await adminDb.collection("users").doc(userId).get();
-    } catch(err) {
-        console.error("Error fetching user data:", err);
+    console.log("[VOICE] Loading memories");
+    let memories: string[] = [];
+    if (memoryEnabled) {
+      try {
+        const memoriesSnap = await adminDb.collection("memories").where("userId", "==", userId).get();
+        memories = memoriesSnap.docs.map((doc) => doc.data()?.content).filter(Boolean);
+      } catch (err: any) {
+        console.error("[VOICE] Error loading memories:", err?.message || err);
+      }
     }
-    
-    const userData = userDoc?.exists ? (userDoc.data() as any) : {};
-    
-    const voice = userData.voice || "Zephyr";
-    const personality = userData.personality || "default";
-    const name = userData.preferredName || "friend";
-    const memories = userData.memories || [];
-    const memoryEnabled = userData.memoryEnabled !== false;
     
     // Construct humanized system instructions with extreme naturalness, prosody, and organic conversational cadence
     let personalityInstruction = `You are Aura, an exceptionally natural, articulate, warm, and emotionally intelligent real-time conversational partner.
@@ -148,7 +169,7 @@ STRICT SPOKEN FORMATTING:
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      console.error("GEMINI_API_KEY is not defined in the environment.");
+      console.error("[VOICE] GEMINI_API_KEY is not defined in the environment.");
       safeSend({ type: "error", message: "AI API key is missing on the server. Please check Settings > Secrets." });
       if (ws.readyState === ws.OPEN) {
         try { ws.close(); } catch (e) {}
@@ -167,9 +188,11 @@ STRICT SPOKEN FORMATTING:
 
     let session: any = null;
     let isSessionClosed = false;
+    let hasLoggedAudioInput = false;
+    let hasLoggedAudioOutput = false;
 
     try {
-      console.log("Attempting to connect to Gemini Live API with model gemini-3.1-flash-live-preview...");
+      console.log("[VOICE] Connecting Gemini Live");
       session = await ai.live.connect({
         model: "gemini-3.1-flash-live-preview",
         config: {
@@ -202,6 +225,10 @@ STRICT SPOKEN FORMATTING:
             if (parts) {
               for (const part of parts) {
                 if (part.inlineData?.data) {
+                  if (!hasLoggedAudioOutput) {
+                    console.log("[VOICE] Gemini audio received");
+                    hasLoggedAudioOutput = true;
+                  }
                   safeSend({ type: "audio", data: part.inlineData.data });
                 }
                 if (part.text) {
@@ -242,18 +269,21 @@ STRICT SPOKEN FORMATTING:
 
             // 5. Interrupted event (Barge-in!)
             if (message.serverContent?.interrupted) {
+              hasLoggedAudioOutput = false;
               safeSend({ type: "interrupted" });
             }
 
             // 6. Turn complete event
             if (message.serverContent?.turnComplete) {
+              hasLoggedAudioOutput = false;
+              hasLoggedAudioInput = false;
               safeSend({ type: "turn-complete" });
             }
           },
           onclose: (event: any) => {
             const code = event?.code || 1000;
             const reason = event?.reason ? ` - ${event.reason}` : "";
-            console.log(`Gemini Live API connection closed (code ${code}${reason})`);
+            console.log(`[VOICE] Gemini Live connection closed (code ${code}${reason})`);
             isSessionClosed = true;
             if (code === 1011 || reason.toLowerCase().includes("quota")) {
               safeSend({ type: "error", message: "API Quota Exceeded (1011). Please check your Google AI Studio plan and billing details." });
@@ -266,7 +296,7 @@ STRICT SPOKEN FORMATTING:
           },
           onerror: (err: any) => {
             const errMsg = err?.message || "Gemini Live session error.";
-            console.warn("Gemini Live API notification:", errMsg);
+            console.warn("[VOICE] Gemini Live API error:", errMsg);
             if (errMsg.toLowerCase().includes("quota") || errMsg.includes("1011")) {
               safeSend({ type: "error", message: "API Quota Exceeded (1011). Please check your Google AI Studio plan and billing details." });
             } else {
@@ -276,12 +306,13 @@ STRICT SPOKEN FORMATTING:
         },
       });
 
-      console.log("Connected to Gemini Live API successfully");
+      console.log("[VOICE] Gemini Live connected");
+      console.log("[VOICE] Sending connected status");
       safeSend({ type: "status", status: "connected" });
 
     } catch (err: any) {
       const errMsg = err?.message || "Failed to connect to Gemini Live API.";
-      console.error("Error connecting to Gemini Live API:", errMsg, err?.stack || "");
+      console.error("[VOICE] Error connecting to Gemini Live API:", errMsg, err?.stack || "");
       if (errMsg.toLowerCase().includes("quota") || errMsg.includes("1011")) {
         safeSend({ type: "error", message: "API Quota Exceeded (1011). Please check your Google AI Studio plan and billing details." });
       } else {
@@ -299,6 +330,10 @@ STRICT SPOKEN FORMATTING:
       try {
         const message = JSON.parse(data.toString());
         if (message.audio) {
+          if (!hasLoggedAudioInput) {
+            console.log("[VOICE] Client audio received");
+            hasLoggedAudioInput = true;
+          }
           try {
             session.sendRealtimeInput({
               audio: { data: message.audio, mimeType: "audio/pcm;rate=16000" },
@@ -329,7 +364,7 @@ STRICT SPOKEN FORMATTING:
     });
 
     ws.on("close", () => {
-      console.log("WebSocket client disconnected");
+      console.log("[VOICE] WebSocket closed");
       isSessionClosed = true;
       if (session) {
         try {

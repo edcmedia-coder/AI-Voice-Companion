@@ -88,10 +88,6 @@ export function VoiceProvider({ userId, activeTab, setActiveTab, children }: Voi
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const cameraIntervalRef = useRef<any>(null);
 
-  // WebSocket & Speech Recognition refs
-  const wsRef = useRef<WebSocket | null>(null);
-  const speechRecognitionRef = useRef<any>(null);
-
   // DB Session tracking refs
   const conversationIdRef = useRef<string | null>(null);
   const messagesAccumulatorRef = useRef<{ role: "user" | "model"; text: string }[]>([]);
@@ -180,6 +176,14 @@ export function VoiceProvider({ userId, activeTab, setActiveTab, children }: Voi
 
   // Start live voice session
   const startSession = async () => {
+    if (voiceSessionRef.current) {
+      const currentState = voiceSessionRef.current.getState();
+      if (currentState !== "IDLE" && currentState !== "ERROR") {
+        console.warn(`[VOICE] Voice session already active (${currentState}). Ignoring duplicate start.`);
+        return;
+      }
+    }
+
     setErrorMsg("");
     setSessionDuration(0);
     setSessionState("CONNECTING");
@@ -191,28 +195,26 @@ export function VoiceProvider({ userId, activeTab, setActiveTab, children }: Voi
     messagesAccumulatorRef.current = [];
 
     try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        throw new Error("Authentication required. Please sign in again.");
+      }
+      const token = await currentUser.getIdToken(true);
+
       const settings = await getUserSettings(userId);
       const name = settings?.preferredName || "friend";
-      const voice = settings?.voiceId || "Zephyr";
-      const personality = settings?.personality || "default";
-      
-      const currentUser = auth.currentUser;
-      const token = currentUser ? await currentUser.getIdToken() : "local-user";
 
       const convId = await createConversation(userId, `Aura Session with ${name}`);
       conversationIdRef.current = convId;
 
-      const session = new VoiceSession({
-        voice,
-        personality,
-        name,
-        memoryEnabled: settings?.memoryEnabled !== false,
-        token
-      });
+      const session = new VoiceSession({ token });
       voiceSessionRef.current = session;
 
       await session.start((msg) => {
-        setSessionState(session.getState());
+        const state = session.getState();
+        setSessionState(state);
+        setIsWsConnected(state === "CONNECTED" || state === "WAITING_FOR_GEMINI" || state === "USER_SPEAKING" || state === "AI_SPEAKING" || state === "LISTENING");
+
         if (msg.type === "model-text") {
           setCurrentModelText((prev) => {
             const updated = prev + msg.text;
@@ -229,9 +231,9 @@ export function VoiceProvider({ userId, activeTab, setActiveTab, children }: Voi
           const modelText = currentModelTextRef.current;
           if (modelText) {
             setLiveTranscript((prev) => [...prev, { role: "model", text: modelText, timestamp: Date.now() }]);
-            const convId = conversationIdRef.current;
-            if (convId) {
-              addMessageToConversation(convId, "model", modelText);
+            const activeConvId = conversationIdRef.current;
+            if (activeConvId) {
+              addMessageToConversation(activeConvId, "model", modelText);
               messagesAccumulatorRef.current.push({ role: "model", text: modelText });
             }
             setCurrentModelText("");
@@ -240,15 +242,18 @@ export function VoiceProvider({ userId, activeTab, setActiveTab, children }: Voi
         } else if (msg.type === "error") {
           setErrorMsg(msg.message || "Voice session error");
           setSessionState("ERROR");
+          setIsWsConnected(false);
         }
       });
-      setSessionState("CONNECTED");
-      setIsWsConnected(true);
     } catch (err: any) {
-      console.error("Failed to start session:", err);
-      setErrorMsg(err.message || "Microphone permission is required to start a voice session.");
+      console.error("[VOICE] Failed to start session:", err);
+      setErrorMsg(err.message || "Unable to connect to Aura.");
       setSessionState("ERROR");
       setIsWsConnected(false);
+      if (voiceSessionRef.current) {
+        voiceSessionRef.current.stop();
+        voiceSessionRef.current = null;
+      }
     }
   };
 

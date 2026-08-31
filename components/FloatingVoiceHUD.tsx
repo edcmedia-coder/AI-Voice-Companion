@@ -32,13 +32,16 @@ export default function FloatingVoiceHUD() {
   };
 
   const getStatusBadge = () => {
+    if (sessionState === "CONNECTING" || sessionState === "WAITING_FOR_GEMINI") {
+      return { text: "CONNECTING", color: "border-amber-500/60 text-amber-300 bg-amber-950/40" };
+    }
     if (sessionState === "USER_SPEAKING") {
       return { text: "LISTENING", color: "border-amber-500 text-amber-400 bg-amber-950/40" };
     }
     if (sessionState === "AI_SPEAKING") {
       return { text: "RESPONDING", color: "border-cyan-400 text-cyan-300 bg-cyan-950/40" };
     }
-    if (sessionState === "PROCESSING") {
+    if (sessionState === "AI_THINKING") {
       return { text: "THINKING", color: "border-cyan-500 text-cyan-400 bg-cyan-950/40" };
     }
     return { text: "CONNECTED", color: "border-cyan-600 text-cyan-400 bg-cyan-950/30" };
