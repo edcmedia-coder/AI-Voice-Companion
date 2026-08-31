@@ -3,6 +3,7 @@ import { parse } from "url";
 import next from "next";
 import { WebSocketServer } from "ws";
 import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
+import { adminAuth, adminDb } from "./lib/firebase-admin";
 
 const port = parseInt(process.env.PORT || "3000", 10);
 const dev = process.env.NODE_ENV !== "production";
@@ -79,12 +80,39 @@ app.prepare().then(() => {
     };
 
     const parsedUrl = parse(req.url || "", true);
-    const query = parsedUrl.query;
+    const token = req.headers["authorization"]?.replace("Bearer ", "") || (parsedUrl.query.token as string);
 
-    const voice = (query.voice as string) || "Zephyr";
-    const personality = (query.personality as string) || "default";
-    const name = (query.name as string) || "friend";
-    const memoriesStr = (query.memories as string) || "";
+    let userId: string | null = null;
+    try {
+      if (token) {
+        const decodedToken = await adminAuth.verifyIdToken(token);
+        userId = decodedToken.uid;
+      }
+    } catch (err) {
+      console.error("Auth verification failed:", err);
+    }
+
+    if (!userId) {
+      console.error("WebSocket connection rejected: No valid auth token.");
+      safeSend({ type: "error", message: "Authentication required." });
+      ws.close();
+      return;
+    }
+
+    let userDoc;
+    try {
+        userDoc = await adminDb.collection("users").doc(userId).get();
+    } catch(err) {
+        console.error("Error fetching user data:", err);
+    }
+    
+    const userData = userDoc?.exists ? (userDoc.data() as any) : {};
+    
+    const voice = userData.voice || "Zephyr";
+    const personality = userData.personality || "default";
+    const name = userData.preferredName || "friend";
+    const memories = userData.memories || [];
+    const memoryEnabled = userData.memoryEnabled !== false;
     
     // Construct humanized system instructions with extreme naturalness, prosody, and organic conversational cadence
     let personalityInstruction = `You are Aura, an exceptionally natural, articulate, warm, and emotionally intelligent real-time conversational partner.
@@ -111,8 +139,8 @@ STRICT SPOKEN FORMATTING:
     }
 
     let systemInstruction = `${personalityInstruction} You are conversing directly with "${name}".`;
-    if (memoriesStr) {
-      systemInstruction += ` You personally remember these background details about them: ${memoriesStr}. Weave these insights into the conversation naturally when contextually relevant.`;
+    if (memoryEnabled && memories.length > 0) {
+      systemInstruction += ` You personally remember these background details about them: ${memories.join(", ")}. Weave these insights into the conversation naturally when contextually relevant.`;
     }
 
     const apiKey = process.env.GEMINI_API_KEY;
@@ -222,16 +250,25 @@ STRICT SPOKEN FORMATTING:
           onclose: (event: any) => {
             const code = event?.code || 1000;
             const reason = event?.reason ? ` - ${event.reason}` : "";
-            console.log(`Gemini Live API connection closed cleanly (code ${code}${reason})`);
+            console.log(`Gemini Live API connection closed (code ${code}${reason})`);
             isSessionClosed = true;
-            safeSend({ type: "status", status: "closed" });
+            if (code === 1011 || reason.toLowerCase().includes("quota")) {
+              safeSend({ type: "error", message: "API Quota Exceeded (1011). Please check your Google AI Studio plan and billing details." });
+            } else {
+              safeSend({ type: "status", status: "closed" });
+            }
             if (ws.readyState === ws.OPEN) {
               try { ws.close(); } catch (e) {}
             }
           },
           onerror: (err: any) => {
-            console.warn("Gemini Live API notification:", err?.message || "Session update");
-            safeSend({ type: "error", message: err?.message || "Gemini Live session error." });
+            const errMsg = err?.message || "Gemini Live session error.";
+            console.warn("Gemini Live API notification:", errMsg);
+            if (errMsg.toLowerCase().includes("quota") || errMsg.includes("1011")) {
+              safeSend({ type: "error", message: "API Quota Exceeded (1011). Please check your Google AI Studio plan and billing details." });
+            } else {
+              safeSend({ type: "error", message: errMsg });
+            }
           }
         },
       });
@@ -240,8 +277,13 @@ STRICT SPOKEN FORMATTING:
       safeSend({ type: "status", status: "connected" });
 
     } catch (err: any) {
-      console.error("Error connecting to Gemini Live API:", err?.message || err, err?.stack || "");
-      safeSend({ type: "error", message: err?.message || "Failed to connect to Gemini Live API." });
+      const errMsg = err?.message || "Failed to connect to Gemini Live API.";
+      console.error("Error connecting to Gemini Live API:", errMsg, err?.stack || "");
+      if (errMsg.toLowerCase().includes("quota") || errMsg.includes("1011")) {
+        safeSend({ type: "error", message: "API Quota Exceeded (1011). Please check your Google AI Studio plan and billing details." });
+      } else {
+        safeSend({ type: "error", message: errMsg });
+      }
       if (ws.readyState === ws.OPEN) {
         try { ws.close(); } catch (e) {}
       }

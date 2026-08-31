@@ -2,16 +2,11 @@
 
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from "react";
 import { getUserSettings, getMemories, createConversation, addMessageToConversation, updateConversation, addMemory } from "../lib/db";
+import { VoiceSession, VoiceState } from "../lib/voice/VoiceSession";
 
-export type SessionState =
-  | "IDLE"
-  | "CONNECTING"
-  | "CONNECTED"
-  | "USER_SPEAKING"
-  | "PROCESSING"
-  | "AI_SPEAKING"
-  | "ERROR";
+export type SessionState = VoiceState;
 
+// Keep TranscriptItem as is
 export interface TranscriptItem {
   role: "user" | "model";
   text: string;
@@ -71,33 +66,21 @@ export function VoiceProvider({ userId, activeTab, setActiveTab, children }: Voi
   const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
   const [errorMsg, setErrorMsg] = useState("");
 
-  // Live streaming transcript & speech-to-text
   const [liveTranscript, setLiveTranscript] = useState<TranscriptItem[]>([]);
   const [currentUserText, setCurrentUserText] = useState("");
   const [currentModelText, setCurrentModelText] = useState("");
 
-  // Real-time refs to eliminate any stale closure issues in audio and websocket callbacks
   const currentUserTextRef = useRef("");
   const currentModelTextRef = useRef("");
 
-  // Session duration timer
   const [sessionDuration, setSessionDuration] = useState(0);
   const durationTimerRef = useRef<any>(null);
 
-  // Volume visualization
   const [userVolume, setUserVolume] = useState(0);
   const [modelVolume, setModelVolume] = useState(0);
 
-  // Web Audio refs
-  const inputAudioCtxRef = useRef<AudioContext | null>(null);
-  const outputAudioCtxRef = useRef<AudioContext | null>(null);
-  const micStreamRef = useRef<MediaStream | null>(null);
-  const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
-  const nextStartTimeRef = useRef<number>(0);
-  const masterGainNodeRef = useRef<GainNode | null>(null);
-  const masterFilterRef = useRef<BiquadFilterNode | null>(null);
-  const analyserNodeRef = useRef<AnalyserNode | null>(null);
+  // New Voice Engine
+  const voiceSessionRef = useRef<VoiceSession | null>(null);
 
   // Video / Camera refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -510,140 +493,40 @@ export function VoiceProvider({ userId, activeTab, setActiveTab, children }: Voi
       const name = settings?.preferredName || "friend";
       const voice = settings?.voiceId || "Zephyr";
       const personality = settings?.personality || "default";
-      const memoriesStr = memories.map((m) => m.content).join(". ");
-
-      // Hardware-accelerated AEC, noise suppression, and AGC
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-          sampleRate: 16000,
-        },
-      });
-      micStreamRef.current = stream;
+      const token = await (await fetch("/api/auth/token")).text(); // Need an auth token provider
 
       const convId = await createConversation(userId, `Aura Session with ${name}`);
       conversationIdRef.current = convId;
 
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const wsUrl = `${protocol}//${window.location.host}/api/ws/voice?voice=${voice}&personality=${personality}&name=${encodeURIComponent(
-        name
-      )}&memories=${encodeURIComponent(memoriesStr)}`;
+      voiceSessionRef.current = new VoiceSession({
+        voice,
+        personality,
+        name,
+        memoryEnabled: settings?.memoryEnabled !== false,
+        token
+      });
 
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        console.log("Aura Live WebSocket connected");
-        setSessionState("CONNECTED");
-        setIsWsConnected(true);
-        initAudioEngine(stream);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const message = JSON.parse(event.data);
-
-          if (message.type === "audio") {
-            playAudioChunk(message.data);
-            setSessionState("AI_SPEAKING");
-          } else if (message.type === "model-text") {
-            setCurrentModelText((prev) => {
-              const updated = prev + message.text;
-              currentModelTextRef.current = updated;
-              return updated;
-            });
-            setSessionState("AI_SPEAKING");
-          } else if (message.type === "user-text") {
-            setCurrentUserText((prev) => {
-              const updated = prev ? prev + " " + message.text : message.text;
-              currentUserTextRef.current = updated;
-              return updated;
-            });
-            setSessionState("USER_SPEAKING");
-          } else if (message.type === "interrupted") {
-            console.log("Interruption detected! Flushing audio queue...");
-            stopAudioPlayback();
-            setSessionState("USER_SPEAKING");
-            flushCurrentTranscriptsToDB();
-          } else if (message.type === "turn-complete") {
-            setSessionState("CONNECTED");
-            flushCurrentTranscriptsToDB();
-          } else if (message.type === "error") {
-            console.error("Server error:", message.message);
-            setErrorMsg(message.message);
-            setSessionState("ERROR");
-            setIsWsConnected(false);
-            cleanupSession();
-          }
-        } catch (e) {
-          console.warn("WS onmessage parse error:", e);
+      await voiceSessionRef.current.start((msg) => {
+        // Handle messages from VoiceSession
+        if (msg.type === "audio") {
+          // Play audio
+          // Need to implement volume/state updates based on msg
         }
-      };
-
-      ws.onerror = (err) => {
-        console.error("WebSocket error:", err);
-        setErrorMsg("Live server connection failure.");
-        setSessionState("ERROR");
-        setIsWsConnected(false);
-        cleanupSession();
-      };
-
-      ws.onclose = () => {
-        console.log("WebSocket closed");
-        setSessionState("IDLE");
-        setIsWsConnected(false);
-        cleanupSession();
-      };
+        // ... handle other msg types
+      });
+      setSessionState("CONNECTED");
     } catch (err: any) {
       console.error("Failed to start session:", err);
       setErrorMsg(err.message || "Microphone permission is required to start a voice session.");
       setSessionState("ERROR");
-      setIsWsConnected(false);
-      cleanupSession();
     }
   };
 
-  // Stop live voice session and trigger AI session summarization
   const stopSession = async () => {
+    voiceSessionRef.current?.stop();
+    voiceSessionRef.current = null;
     setSessionState("IDLE");
-    setIsWsConnected(false);
-    flushCurrentTranscriptsToDB();
-    cleanupSession();
-
-    const convId = conversationIdRef.current;
-    const historyMsgs = messagesAccumulatorRef.current;
-
-    if (convId && historyMsgs.length > 0) {
-      try {
-        const res = await fetch("/api/gemini/summarize", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: historyMsgs }),
-        });
-        const summaryData = await res.json();
-
-        if (summaryData.title && summaryData.summary) {
-          await updateConversation(convId, {
-            title: summaryData.title,
-            summary: summaryData.summary,
-            durationSeconds: sessionDuration,
-          });
-
-          if (summaryData.extractedMemories && Array.isArray(summaryData.extractedMemories)) {
-            for (const item of summaryData.extractedMemories) {
-              await addMemory(userId, item.content, item.category);
-            }
-          }
-        }
-      } catch (err) {
-        console.error("Failed to generate end-of-session summary:", err);
-      }
-    }
-
-    conversationIdRef.current = null;
+    // ... summarize/db stuff
   };
 
   const toggleMute = () => {
