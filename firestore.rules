@@ -1,0 +1,136 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper to validate generic document IDs and prevent ID injection/DoS attacks
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    // Helper to check if a user is authenticated
+    function isAuthenticated() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    // Helper to check if the authenticated user owns a specific UID
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // 1. Validation for Conversation
+    function isValidConversation(data) {
+      return data.keys().hasAll(['userId', 'title', 'createdAt', 'updatedAt'])
+        && data.keys().size() >= 4 && data.keys().size() <= 6
+        && data.userId is string && data.userId == request.auth.uid
+        && data.title is string && data.title.size() <= 200
+        && data.createdAt is string
+        && data.updatedAt is string
+        && (!('durationSeconds' in data) || data.durationSeconds is number)
+        && (!('summary' in data) || data.summary is string);
+    }
+
+    // 2. Validation for Message
+    function isValidMessage(data) {
+      return data.keys().hasAll(['role', 'text', 'createdAt'])
+        && data.keys().size() == 3
+        && data.role is string && (data.role == 'user' || data.role == 'model')
+        && data.text is string && data.text.size() <= 50000
+        && data.createdAt is string;
+    }
+
+    // 3. Validation for Memory
+    function isValidMemory(data) {
+      return data.keys().hasAll(['userId', 'content', 'category', 'createdAt'])
+        && data.keys().size() == 4
+        && data.userId is string && data.userId == request.auth.uid
+        && data.content is string && data.content.size() <= 1000
+        && data.category is string && (data.category == 'preference' || data.category == 'interest' || data.category == 'project' || data.category == 'personal' || data.category == 'general')
+        && data.createdAt is string;
+    }
+
+    // 4. Validation for UserSettings
+    function isValidUserSettings(data) {
+      return data.keys().hasAll(['userId', 'voiceId', 'personality', 'memoryEnabled'])
+        && data.keys().size() >= 4 && data.keys().size() <= 7
+        && data.userId is string && data.userId == request.auth.uid
+        && data.voiceId is string && (data.voiceId == 'Puck' || data.voiceId == 'Charon' || data.voiceId == 'Kore' || data.voiceId == 'Fenrir' || data.voiceId == 'Zephyr')
+        && data.personality is string && (data.personality == 'default' || data.personality == 'empathetic' || data.personality == 'witty' || data.personality == 'supportive' || data.personality == 'direct')
+        && data.memoryEnabled is bool
+        && (!('preferredName' in data) || data.preferredName is string)
+        && (!('humor' in data) || data.humor is string)
+        && (!('interruptionSensitivity' in data) || data.interruptionSensitivity is number);
+    }
+
+    // 5. Validation for SourceDoc
+    function isValidSourceDoc(data) {
+      return data.keys().hasAll(['userId', 'name', 'type', 'size', 'content', 'uploadedAt'])
+        && data.keys().size() == 6
+        && data.userId is string && data.userId == request.auth.uid
+        && data.name is string && data.name.size() <= 256
+        && data.type is string
+        && data.size is number
+        && data.content is string && data.content.size() <= 500000
+        && data.uploadedAt is string;
+    }
+
+    // --- Path Rules ---
+
+    // Knowledge collection
+    match /knowledge/{docId} {
+      allow read, delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() 
+                    && isValidId(docId) 
+                    && isValidSourceDoc(request.resource.data);
+      allow update: if false; // Documents are immutable after ingestion
+    }
+
+    // Conversations collection
+    match /conversations/{conversationId} {
+      allow read, delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() 
+                    && isValidId(conversationId) 
+                    && isValidConversation(request.resource.data);
+      allow update: if isAuthenticated() 
+                    && resource.data.userId == request.auth.uid 
+                    && isValidConversation(request.resource.data)
+                    && request.resource.data.userId == resource.data.userId; // Prevent transferring ownership
+
+      // Subcollection of messages
+      match /messages/{messageId} {
+        allow read: if isAuthenticated() 
+                     && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
+        allow create: if isAuthenticated()
+                     && isValidId(messageId)
+                     && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid
+                     && isValidMessage(request.resource.data);
+        allow update, delete: if false; // Messages are immutable after generation
+      }
+    }
+
+    // Memories collection
+    match /memories/{memoryId} {
+      allow read, delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() 
+                    && isValidId(memoryId) 
+                    && isValidMemory(request.resource.data);
+      allow update: if isAuthenticated() 
+                    && resource.data.userId == request.auth.uid 
+                    && isValidMemory(request.resource.data)
+                    && request.resource.data.userId == resource.data.userId;
+    }
+
+    // UserSettings collection
+    match /settings/{userId} {
+      allow read: if isAuthenticated() && isOwner(userId);
+      allow create: if isAuthenticated() 
+                    && isOwner(userId) 
+                    && isValidId(userId) 
+                    && isValidUserSettings(request.resource.data);
+      allow update: if isAuthenticated() 
+                    && isOwner(userId) 
+                    && isValidUserSettings(request.resource.data)
+                    && request.resource.data.userId == resource.data.userId;
+      allow delete: if false; // Settings cannot be deleted, only updated
+    }
+  }
+}

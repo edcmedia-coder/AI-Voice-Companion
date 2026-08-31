@@ -1,0 +1,92 @@
+{
+  "entities": {
+    "Conversation": {
+      "title": "Conversation",
+      "description": "A live voice or text conversation session with the AI companion.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "The UID of the user who owns this conversation." },
+        "title": { "type": "string", "description": "The generated title of the conversation." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "ISO timestamp when the conversation was started." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "ISO timestamp of the last message in this conversation." },
+        "durationSeconds": { "type": "number", "description": "Total duration of the voice session in seconds." },
+        "summary": { "type": "string", "description": "A brief AI-generated summary of the conversation." }
+      },
+      "required": ["userId", "title", "createdAt", "updatedAt"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "An individual message within a conversation.",
+      "type": "object",
+      "properties": {
+        "role": { "type": "string", "enum": ["user", "model"], "description": "Whether the message was sent by the user or the model." },
+        "text": { "type": "string", "description": "The textual content or transcript of the utterance." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "ISO timestamp when the message was sent or received." }
+      },
+      "required": ["role", "text", "createdAt"]
+    },
+    "Memory": {
+      "title": "Memory",
+      "description": "A persistent memory or preference retained across conversations.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "The UID of the user this memory belongs to." },
+        "content": { "type": "string", "description": "The factual content of the memory." },
+        "category": { "type": "string", "enum": ["preference", "interest", "project", "personal", "general"], "description": "The category of memory for organizing context." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "ISO timestamp when this memory was stored." }
+      },
+      "required": ["userId", "content", "category", "createdAt"]
+    },
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "User specific custom preferences for the AI companion.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "The UID of the user these settings belong to." },
+        "preferredName": { "type": "string", "description": "The name the user prefers to be called." },
+        "voiceId": { "type": "string", "enum": ["Puck", "Charon", "Kore", "Fenrir", "Zephyr"], "description": "The prebuilt Gemini voice ID." },
+        "personality": { "type": "string", "enum": ["default", "empathetic", "witty", "supportive", "direct"], "description": "The personality style of the companion." },
+        "humor": { "type": "string", "enum": ["moderate", "none", "high"], "description": "How humorous or sarcastic the companion should be." },
+        "interruptionSensitivity": { "type": "number", "description": "VAD barge-in threshold or sensitivity." },
+        "memoryEnabled": { "type": "boolean", "description": "Whether the companion should learn and use memories." }
+      },
+      "required": ["userId", "voiceId", "personality", "memoryEnabled"]
+    },
+    "SourceDoc": {
+      "title": "SourceDoc",
+      "description": "A document or text block ingested for knowledge grounding.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "The UID of the user this document belongs to." },
+        "name": { "type": "string", "description": "The filename or title of the document." },
+        "type": { "type": "string", "description": "The MIME type of the content." },
+        "size": { "type": "number", "description": "Size in bytes." },
+        "content": { "type": "string", "description": "The full text content of the document." },
+        "uploadedAt": { "type": "string", "format": "date-time", "description": "ISO timestamp when ingested." }
+      },
+      "required": ["userId", "name", "type", "size", "content", "uploadedAt"]
+    }
+  },
+  "firestore": {
+    "/conversations/{conversationId}": {
+      "schema": "Conversation",
+      "description": "Top-level collection for user conversations."
+    },
+    "/conversations/{conversationId}/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Subcollection of messages inside a conversation."
+    },
+    "/memories/{memoryId}": {
+      "schema": "Memory",
+      "description": "Top-level collection for persistent long-term memories."
+    },
+    "/settings/{userId}": {
+      "schema": "UserSettings",
+      "description": "User-specific configuration document indexed by user UID."
+    },
+    "/knowledge/{docId}": {
+      "schema": "SourceDoc",
+      "description": "Top-level collection for ingested knowledge materials."
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Aura Live",
+  "description": "High-end sci-fi command center AI voice companion featuring real-time streaming, Aura avatar, memory learning, and interactive live chat.",
+  "requestFramePermissions": ["microphone", "camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
